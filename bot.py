@@ -86,13 +86,11 @@ def load_text(block):
 # ---------- STATES ----------
 admin_state = {"step": None}
 reply_targets = {}
-support_wait = set()
 
 # ---------- KEYBOARDS ----------
 def main_menu(user_id):
     kb = [
         [KeyboardButton(text="📤 Залив чека"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="💬 Связь с админом")],
         [KeyboardButton(text="💳 Реквизиты"), KeyboardButton(text="📜 Правила")],
         [KeyboardButton(text="⭐ Отзывы")]
     ]
@@ -109,19 +107,13 @@ def admin_menu():
         resize_keyboard=True
     )
 
-def reply_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="✉️ Ответить заливщику")]],
-        resize_keyboard=True
-    )
-
 # ---------- START ----------
 @dp.message(F.text == "/start")
 async def start_cmd(msg: Message):
     get_or_create_user(msg.from_user)
     await msg.answer_photo(
         FSInputFile("start.jpg"),
-        caption="👋 Добро пожаловать!\nВыберите действие:",
+        caption="👋 Добро пожаловать!",
         reply_markup=main_menu(msg.from_user.id)
     )
 
@@ -133,49 +125,55 @@ async def profile_cmd(msg: Message):
     count = cur.fetchone()[0]
 
     text = (
-        f"👤 Пользователь: @{msg.from_user.username}\n"
-        f"🆔 ID: {msg.from_user.id}\n"
+        f"👤 @{msg.from_user.username}\n"
+        f"🆔 {msg.from_user.id}\n"
         f"🔹 BOT ID: {user[2]}\n\n"
-        f"📊 Всего заливов: {count}"
-    )
-    await msg.answer(text, reply_markup=main_menu(msg.from_user.id))
-
-# ---------- SUPPORT (USER → ADMIN) ----------
-@dp.message(F.text == "💬 Связь с админом")
-async def support_start(msg: Message):
-    support_wait.add(msg.from_user.id)
-    await msg.answer(
-        "✍️ Напишите сообщение администратору:",
-        reply_markup=ReplyKeyboardRemove()
+        f"📊 Заливов: {count}"
     )
 
-@dp.message()
-async def support_send(msg: Message):
-    # пользователь пишет админу
-    if msg.from_user.id in support_wait:
-        support_wait.remove(msg.from_user.id)
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📜 История заливов")],
+            [KeyboardButton(text="⬅️ В меню")]
+        ],
+        resize_keyboard=True
+    )
 
-        text = (
-            "📩 <b>Сообщение от пользователя</b>\n\n"
-            f"👤 @{msg.from_user.username}\n"
-            f"🆔 ID: <code>{msg.from_user.id}</code>\n\n"
-            f"{msg.text}"
-        )
+    await msg.answer(text, reply_markup=kb)
 
-        reply_targets[ADMIN_ID] = msg.from_user.id
+# ---------- HISTORY ----------
+@dp.message(F.text == "📜 История заливов")
+async def history_cmd(msg: Message):
+    cur.execute(
+        "SELECT amount, card, created FROM deposits WHERE user_id=? ORDER BY id DESC",
+        (msg.from_user.id,)
+    )
+    rows = cur.fetchall()
 
-        await bot.send_message(
-            ADMIN_ID,
-            text,
-            parse_mode="HTML",
-            reply_markup=reply_menu()
-        )
-
-        await msg.answer(
-            "✅ Сообщение отправлено админу.",
-            reply_markup=main_menu(msg.from_user.id)
-        )
+    if not rows:
+        await msg.answer("❌ История пустая")
         return
+
+    text = "📊 Ваша история:\n\n"
+    for r in rows:
+        text += f"💰 {r[0]} | 💳 {r[1]} | 📅 {r[2]}\n"
+
+    await msg.answer(text)
+
+# ---------- ADMIN PANEL ----------
+@dp.message(F.text == "🛠 Админ-панель")
+async def admin_panel(msg: Message):
+    if msg.from_user.id == ADMIN_ID:
+        await msg.answer("🛠 Админ-панель", reply_markup=admin_menu())
+
+@dp.message(F.text == "➕ Добавить залив")
+async def add_dep_start(msg: Message):
+    if msg.from_user.id == ADMIN_ID:
+        admin_state["step"] = "wait_id"
+        await msg.answer(
+            "Введите Telegram ID пользователя:",
+            reply_markup=ReplyKeyboardRemove()
+        )
 
 # ---------- CHECK ----------
 @dp.message(F.text == "📤 Залив чека")
@@ -186,42 +184,48 @@ async def check_start(msg: Message):
 async def handle_check(msg: Message):
     reply_targets[ADMIN_ID] = msg.from_user.id
 
-    text = (
-        "🧾 <b>Новый чек</b>\n"
-        f"👤 @{msg.from_user.username}\n"
-        f"🆔 <code>{msg.from_user.id}</code>"
-    )
-
     await bot.send_message(
         ADMIN_ID,
-        text,
-        parse_mode="HTML",
-        reply_markup=reply_menu()
+        f"🧾 Новый чек\n@{msg.from_user.username}\nID: {msg.from_user.id}"
     )
     await bot.forward_message(ADMIN_ID, msg.chat.id, msg.message_id)
-    await msg.answer("✅ Чек получен. Ожидайте проверки.")
+    await msg.answer("✅ Чек получен.")
 
-# ---------- ADMIN REPLY ----------
-@dp.message(F.text == "✉️ Ответить заливщику")
-async def admin_reply_start(msg: Message):
-    if msg.from_user.id == ADMIN_ID:
-        admin_state["step"] = "reply"
-        await msg.answer("✍️ Введите сообщение пользователю:")
-
+# ---------- ADMIN STEPS (ТОЛЬКО ЕСЛИ STEP АКТИВЕН) ----------
 @dp.message(F.text)
-async def admin_reply(msg: Message):
+async def admin_steps(msg: Message):
     if msg.from_user.id != ADMIN_ID:
         return
 
-    if admin_state.get("step") == "reply":
-        target = reply_targets.get(ADMIN_ID)
-        if target:
-            await bot.send_message(
-                target,
-                f"📩 Сообщение от админа:\n\n{msg.text}"
+    if admin_state["step"] is None:
+        return  # ⬅️ ВАЖНО! больше не ломает кнопки
+
+    if admin_state["step"] == "wait_id":
+        admin_state["user_id"] = msg.text
+        admin_state["step"] = "wait_amount"
+        await msg.answer("Введите сумму:")
+        return
+
+    if admin_state["step"] == "wait_amount":
+        admin_state["amount"] = msg.text
+        admin_state["step"] = "wait_system"
+        await msg.answer("Введите систему:")
+        return
+
+    if admin_state["step"] == "wait_system":
+        cur.execute(
+            "INSERT INTO deposits (user_id, amount, card, status, created) VALUES (?, ?, ?, ?, ?)",
+            (
+                admin_state["user_id"],
+                admin_state["amount"],
+                msg.text,
+                "Success",
+                datetime.now().strftime("%d.%m.%Y %H:%M")
             )
-            await msg.answer("✅ Отправлено", reply_markup=admin_menu())
+        )
+        db.commit()
         admin_state["step"] = None
+        await msg.answer("✅ Залив добавлен", reply_markup=admin_menu())
 
 # ---------- OTHER ----------
 @dp.message(F.text == "💳 Реквизиты")
@@ -235,11 +239,6 @@ async def rules(msg: Message):
 @dp.message(F.text == "⭐ Отзывы")
 async def reviews(msg: Message):
     await msg.answer(config.get("REVIEWS_CHANNEL", "Канал не указан"))
-
-@dp.message(F.text == "🛠 Админ-панель")
-async def admin_panel(msg: Message):
-    if msg.from_user.id == ADMIN_ID:
-        await msg.answer("🛠 Админ-панель", reply_markup=admin_menu())
 
 @dp.message(F.text == "⬅️ В меню")
 async def back_menu(msg: Message):
