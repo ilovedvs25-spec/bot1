@@ -51,14 +51,40 @@ admin_state = {"target_user": None, "step": None}
 reply_targets = {} 
 
 # ---------- HELPERS ----------
-def get_or_create_user(user):
-    cur.execute("SELECT * FROM users WHERE tg_id=?", (user.id,))
+async def get_or_create_user_with_notify(user: Message):
+    """Проверяет юзера, создает если новый и уведомляет админа"""
+    cur.execute("SELECT * FROM users WHERE tg_id=?", (user.from_user.id,))
     row = cur.fetchone()
+    
+    username = f"@{user.from_user.username}" if user.from_user.username else "Без юзернейма"
+    
     if not row:
+        # НОВЫЙ ПОЛЬЗОВАТЕЛЬ
         uid = f"#{random.randint(10000,99999)}"
-        cur.execute("INSERT INTO users VALUES (?, ?, ?)", (user.id, user.username, uid))
+        cur.execute("INSERT INTO users VALUES (?, ?, ?)", (user.from_user.id, user.from_user.username, uid))
         db.commit()
-    return row
+        
+        # Уведомление админу о регистрации
+        try:
+            msg_to_admin = (f"🚀 <b>НОВЫЙ пользователь!</b>\n"
+                            f"Юзер: {username}\n"
+                            f"ID: <code>{user.from_user.id}</code>\n"
+                            f"Дата: {datetime.now().strftime('%d.%m %H:%M')}")
+            await bot.send_message(ADMIN_ID, msg_to_admin, parse_mode=ParseMode.HTML)
+            logging.info(f"New user: {username} ({user.from_user.id})")
+        except Exception as e:
+            logging.error(f"Ошибка уведомления админа: {e}")
+        return False # Вернем False, что означает "был новым"
+    else:
+        # СТАРЫЙ ПОЛЬЗОВАТЕЛЬ
+        try:
+            msg_to_admin = (f"📱 <b>Бот онлайн:</b> {username}\n"
+                            f"ID: <code>{user.from_user.id}</code>")
+            await bot.send_message(ADMIN_ID, msg_to_admin, parse_mode=ParseMode.HTML)
+            logging.info(f"Existing user active: {username}")
+        except:
+            pass
+        return True # Юзер уже был в базе
 
 def load_text(block):
     try:
@@ -102,7 +128,9 @@ def back_kb():
 
 @dp.message(F.text == "/start")
 async def start_cmd(msg: Message):
-    get_or_create_user(msg.from_user)
+    # Вызываем нашу новую функцию проверки и уведомления
+    await get_or_create_user_with_notify(msg)
+    
     user_states[msg.from_user.id] = None
     try:
         await msg.answer_photo(
