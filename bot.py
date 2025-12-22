@@ -4,7 +4,7 @@ import random
 import logging
 from datetime import datetime
 
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
     FSInputFile,
@@ -25,8 +25,8 @@ def load_config():
                 if "=" in line:
                     k, v = line.strip().split("=", 1)
                     data[k] = v
-    except FileNotFoundError:
-        print("Файл config.txt не найден!")
+    except Exception as e:
+        print(f"Ошибка загрузки конфига: {e}")
     return data
 
 config = load_config()
@@ -45,13 +45,12 @@ cur.execute("CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, userna
 cur.execute("CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, card TEXT, status TEXT, created TEXT)")
 db.commit()
 
-# ---------- STATE & HELPERS ----------
-# Состояния для админки и связи
-user_states = {} # {user_id: 'step'}
+# ---------- STATE ----------
+user_states = {}  # Для связи с админом
 admin_state = {"target_user": None, "step": None}
-# Для того, чтобы админ мог отвечать на сообщения юзеров
 reply_targets = {} 
 
+# ---------- HELPERS ----------
 def get_or_create_user(user):
     cur.execute("SELECT * FROM users WHERE tg_id=?", (user.id,))
     row = cur.fetchone()
@@ -65,13 +64,19 @@ def load_text(block):
     try:
         with open("texts.txt", "r", encoding="utf-8") as f:
             text = f.read()
-        start = text.find(f"==={block}===")
-        if start == -1: return f"Ошибка: Блок {block} не найден"
-        start_idx = start + len(block) + 6
+        start_marker = f"==={block}==="
+        start = text.find(start_marker)
+        if start == -1:
+            return f"⚠️ Ошибка: Блок {block} не найден в texts.txt"
+        
+        start_idx = start + len(start_marker)
         end_idx = text.find("===", start_idx)
+        
+        if end_idx == -1:
+            return text[start_idx:].strip()
         return text[start_idx:end_idx].strip()
-    except:
-        return "Текст не найден в файле."
+    except Exception as e:
+        return f"❌ Ошибка чтения файла: {e}"
 
 # ---------- KEYBOARDS ----------
 def main_menu(user_id):
@@ -111,21 +116,24 @@ async def start_cmd(msg: Message):
 
 @dp.message(F.text == "📜 Правила")
 async def rules_cmd(msg: Message):
-    await msg.answer(load_text("RULES"), parse_mode=ParseMode.HTML)
+    content = load_text("RULES")
+    await msg.answer(content, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "💳 Реквизиты")
 async def rekv_cmd(msg: Message):
-    await msg.answer(load_text("REKVIZITY"), parse_mode=ParseMode.HTML)
+    content = load_text("REKVIZITY")
+    await msg.answer(content, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "⭐ Отзывы")
 async def reviews_cmd(msg: Message):
-    await msg.answer(f"Наши отзывы тут: {config.get('REVIEWS_CHANNEL', 'не указано')}")
+    channel = config.get("REVIEWS_CHANNEL", "Канал не указан")
+    await msg.answer(f"⭐ <b>Наши отзывы:</b> {channel}", parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "⬅️ В меню")
 async def to_main(msg: Message):
     user_states[msg.from_user.id] = None
     if msg.from_user.id == ADMIN_ID: admin_state["step"] = None
-    await msg.answer("Главное меню", reply_markup=main_menu(msg.from_user.id))
+    await msg.answer("🏠 Главное меню", reply_markup=main_menu(msg.from_user.id))
 
 @dp.message(F.text == "👨‍💻 Связь с админом")
 async def support_cmd(msg: Message):
@@ -153,6 +161,10 @@ async def history_cmd(msg: Message):
     for r in rows: res += f"💰 {r[0]} | 💳 {r[1]} | 📅 {r[2]}\n"
     await msg.answer(res, parse_mode=ParseMode.HTML)
 
+@dp.message(F.text == "📤 Залив чека")
+async def zaliv_text(msg: Message):
+    await msg.answer("📤 <b>Отправьте чек о заливе</b> боту в виде фото или файла.", parse_mode=ParseMode.HTML)
+
 # ---------- ADMIN LOGIC ----------
 
 @dp.message(F.text == "🛠 Админ-панель")
@@ -170,38 +182,37 @@ async def add_dep_start(msg: Message):
 async def handle_docs(msg: Message):
     await bot.send_message(ADMIN_ID, f"🧾 <b>Новый чек!</b>\nОт: @{msg.from_user.username}\nID: <code>{msg.from_user.id}</code>", parse_mode=ParseMode.HTML)
     await bot.forward_message(ADMIN_ID, msg.chat.id, msg.message_id)
-    reply_targets[ADMIN_ID] = msg.from_user.id
+    reply_targets[ADMIN_ID] = msg.from_user.id # Запоминаем последнего приславшего чек
     await msg.answer("✅ Чек получен. Ожидайте проверки.")
 
-# ---------- UNIVERSAL TEXT HANDLER ----------
+# ---------- GLOBAL TEXT HANDLER (LAST PRIORITY) ----------
 
 @dp.message(F.text)
 async def global_text_handler(msg: Message):
     uid = msg.from_user.id
-    
-    # Логика ответа админа (если админ отвечает на чье-то сообщение)
+
+    # 1. Ответ админа на сообщение (через Reply)
     if uid == ADMIN_ID and msg.reply_to_message:
-        # Пробуем вытащить ID из текста или словаря
         target_id = reply_targets.get(ADMIN_ID)
         if target_id:
             try:
                 await bot.send_message(target_id, f"<b>📩 Ответ от администратора:</b>\n\n{msg.text}", parse_mode=ParseMode.HTML)
-                await msg.answer("✅ Ответ отправлен юзеру.")
+                await msg.answer("✅ Ответ отправлен пользователю.")
                 return
             except:
-                await msg.answer("❌ Не удалось отправить сообщение.")
+                await msg.answer("❌ Ошибка отправки (возможно, юзер заблокировал бота).")
 
-    # Логика связи с админом для юзера
+    # 2. Ожидание сообщения в поддержку
     if user_states.get(uid) == "wait_support":
-        await bot.send_message(ADMIN_ID, f"❓ <b>Новый вопрос!</b>\nОт: @{msg.from_user.username}\nID: <code>{uid}</code>\n\nТекст: {msg.text}", parse_mode=ParseMode.HTML)
-        reply_targets[ADMIN_ID] = uid # Запоминаем кому отвечать
-        await msg.answer("✅ Ваше сообщение отправлено админу.")
+        await bot.send_message(ADMIN_ID, f"❓ <b>Новый вопрос!</b>\nОт: @{msg.from_user.username}\nID: <code>{uid}</code>\n\n{msg.text}", parse_mode=ParseMode.HTML)
+        reply_targets[ADMIN_ID] = uid
+        await msg.answer("✅ Ваше сообщение отправлено. Ожидайте ответа.", reply_markup=main_menu(uid))
         user_states[uid] = None
         return
 
-    # Логика добавления залива (админка)
-    if uid == ADMIN_ID:
-        step = admin_state.get("step")
+    # 3. Админка (добавление залива)
+    if uid == ADMIN_ID and admin_state.get("step"):
+        step = admin_state["step"]
         if step == "wait_id":
             admin_state["target_user"] = msg.text
             admin_state["step"] = "wait_amount"
@@ -209,16 +220,13 @@ async def global_text_handler(msg: Message):
         elif step == "wait_amount":
             admin_state["amount"] = msg.text
             admin_state["step"] = "wait_system"
-            await msg.answer("3️⃣ Введите систему:")
+            await msg.answer("3️⃣ Введите систему (карту):")
         elif step == "wait_system":
             cur.execute("INSERT INTO deposits (user_id, amount, card, status, created) VALUES (?, ?, ?, ?, ?)",
                 (admin_state["target_user"], admin_state["amount"], msg.text, "Success", datetime.now().strftime("%d.%m.%Y %H:%M")))
             db.commit()
             admin_state["step"] = None
-            await msg.answer("✅ Залив добавлен", reply_markup=admin_menu())
-    
-    elif msg.text == "📤 Залив чека":
-        await msg.answer("📤 Отправьте скриншот чека боту.")
+            await msg.answer("✅ Залив успешно добавлен!", reply_markup=admin_menu())
 
 # ---------- RUN ----------
 async def main():
