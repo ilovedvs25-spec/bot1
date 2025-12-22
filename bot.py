@@ -6,9 +6,13 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
-    Message, FSInputFile,
-    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+    Message,
+    FSInputFile,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove
 )
+from aiogram.enums import ParseMode
 
 logging.basicConfig(level=logging.INFO)
 
@@ -27,33 +31,19 @@ BOT_TOKEN = config["BOT_TOKEN"]
 ADMIN_ID = int(config["ADMIN_ID"])
 ADMIN_USERNAME = config["ADMIN_USERNAME"]
 
-# ---------- BOT ----------
+# ---------- BOT & DB ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ---------- DATABASE ----------
 db = sqlite3.connect("database.db")
 cur = db.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    tg_id INTEGER PRIMARY KEY,
-    username TEXT,
-    bot_uid TEXT
+cur.execute(
+    "CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, username TEXT, bot_uid TEXT)"
 )
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS deposits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    amount REAL,
-    card TEXT,
-    status TEXT,
-    created TEXT
+cur.execute(
+    "CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, card TEXT, status TEXT, created TEXT)"
 )
-""")
-
 db.commit()
 
 # ---------- HELPERS ----------
@@ -76,16 +66,20 @@ def load_text(block):
             text = f.read()
         start = text.find(f"==={block}===")
         if start == -1:
-            return "Текст не найден"
-        start += len(block) + 6
-        end = text.find("===", start)
-        return text[start:end].strip()
-    except:
-        return "Ошибка чтения файла"
+            return f"Ошибка: Блок {block} не найден"
+        start_idx = start + len(block) + 6
+        end_idx = text.find("===", start_idx)
+        return text[start_idx:end_idx].strip()
+    except Exception as e:
+        return f"Ошибка файла: {e}"
 
-# ---------- STATES ----------
-admin_state = {"step": None}
-reply_targets = {}
+# ---------- STATE ----------
+admin_state = {
+    "target_user": None,
+    "step": None
+}
+
+reply_targets = {ADMIN_ID: None}
 
 # ---------- KEYBOARDS ----------
 def main_menu(user_id):
@@ -107,17 +101,25 @@ def admin_menu():
         resize_keyboard=True
     )
 
-# ---------- START ----------
+# ---------- HANDLERS ----------
 @dp.message(F.text == "/start")
 async def start_cmd(msg: Message):
     get_or_create_user(msg.from_user)
     await msg.answer_photo(
         FSInputFile("start.jpg"),
-        caption="👋 Добро пожаловать!",
-        reply_markup=main_menu(msg.from_user.id)
+        caption="<b>👋 Добро пожаловать!</b>",
+        reply_markup=main_menu(msg.from_user.id),
+        parse_mode=ParseMode.HTML
     )
 
-# ---------- PROFILE ----------
+@dp.message(F.text == "💳 Реквизиты")
+async def rekv_cmd(msg: Message):
+    await msg.answer(load_text("REKVIZITY"), parse_mode=ParseMode.HTML)
+
+@dp.message(F.text == "📜 Правила")
+async def rules_cmd(msg: Message):
+    await msg.answer(load_text("RULES"), parse_mode=ParseMode.HTML)
+
 @dp.message(F.text == "👤 Профиль")
 async def profile_cmd(msg: Message):
     user = get_or_create_user(msg.from_user)
@@ -125,10 +127,9 @@ async def profile_cmd(msg: Message):
     count = cur.fetchone()[0]
 
     text = (
-        f"👤 @{msg.from_user.username}\n"
-        f"🆔 {msg.from_user.id}\n"
-        f"🔹 BOT ID: {user[2]}\n\n"
-        f"📊 Заливов: {count}"
+        f"<b>👤 Профиль:</b> @{msg.from_user.username}\n"
+        f"<b>🆔 ID:</b> <code>{msg.from_user.id}</code>\n"
+        f"<b>📊 Заливов:</b> {count}"
     )
 
     kb = ReplyKeyboardMarkup(
@@ -139,9 +140,8 @@ async def profile_cmd(msg: Message):
         resize_keyboard=True
     )
 
-    await msg.answer(text, reply_markup=kb)
+    await msg.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
-# ---------- HISTORY ----------
 @dp.message(F.text == "📜 История заливов")
 async def history_cmd(msg: Message):
     cur.execute(
@@ -149,74 +149,84 @@ async def history_cmd(msg: Message):
         (msg.from_user.id,)
     )
     rows = cur.fetchall()
-
     if not rows:
-        await msg.answer("❌ История пустая")
+        await msg.answer("❌ У вас еще нет заливов.")
         return
 
-    text = "📊 Ваша история:\n\n"
+    res = "<b>📊 Ваша история:</b>\n\n"
     for r in rows:
-        text += f"💰 {r[0]} | 💳 {r[1]} | 📅 {r[2]}\n"
+        res += f"💰 {r[0]} | 💳 {r[1]} | 📅 {r[2]}\n"
 
-    await msg.answer(text)
+    await msg.answer(res, parse_mode=ParseMode.HTML)
 
-# ---------- ADMIN PANEL ----------
 @dp.message(F.text == "🛠 Админ-панель")
 async def admin_panel(msg: Message):
     if msg.from_user.id == ADMIN_ID:
-        await msg.answer("🛠 Админ-панель", reply_markup=admin_menu())
+        await msg.answer("🛠 Режим админа", reply_markup=admin_menu())
 
 @dp.message(F.text == "➕ Добавить залив")
 async def add_dep_start(msg: Message):
     if msg.from_user.id == ADMIN_ID:
         admin_state["step"] = "wait_id"
         await msg.answer(
-            "Введите Telegram ID пользователя:",
+            "1️⃣ Введите Telegram ID пользователя:",
+            parse_mode=ParseMode.HTML,
             reply_markup=ReplyKeyboardRemove()
         )
 
-# ---------- CHECK ----------
-@dp.message(F.text == "📤 Залив чека")
-async def check_start(msg: Message):
-    await msg.answer("📤 Отправьте фото или PDF чека.")
+@dp.message(F.text == "⬅️ В меню")
+async def to_main(msg: Message):
+    admin_state["step"] = None
+    await msg.answer("Главное меню", reply_markup=main_menu(msg.from_user.id))
 
 @dp.message(F.photo | F.document)
-async def handle_check(msg: Message):
-    reply_targets[ADMIN_ID] = msg.from_user.id
+async def handle_docs(msg: Message):
+    user = msg.from_user
+    reply_targets[ADMIN_ID] = user.id
+
+    admin_text = (
+        f"🧾 <b>Новый чек!</b>\n"
+        f"От: @{user.username}\n"
+        f"ID: <code>{user.id}</code>"
+    )
 
     await bot.send_message(
         ADMIN_ID,
-        f"🧾 Новый чек\n@{msg.from_user.username}\nID: {msg.from_user.id}"
+        admin_text,
+        parse_mode=ParseMode.HTML
     )
-    await bot.forward_message(ADMIN_ID, msg.chat.id, msg.message_id)
-    await msg.answer("✅ Чек получен.")
+    await bot.forward_message(
+        ADMIN_ID,
+        msg.chat.id,
+        msg.message_id
+    )
+    await msg.answer("✅ Чек получен. Ожидайте проверки.")
 
-# ---------- ADMIN STEPS (ТОЛЬКО ЕСЛИ STEP АКТИВЕН) ----------
 @dp.message(F.text)
-async def admin_steps(msg: Message):
+async def admin_worker(msg: Message):
     if msg.from_user.id != ADMIN_ID:
+        if msg.text == "⭐ Отзывы":
+            await msg.answer(config.get("REVIEWS_CHANNEL", "Канал не указан"))
+        elif msg.text == "📤 Залив чека":
+            await msg.answer("📤 Отправьте скриншот чека боту.")
         return
 
-    if admin_state["step"] is None:
-        return  # ⬅️ ВАЖНО! больше не ломает кнопки
-
-    if admin_state["step"] == "wait_id":
-        admin_state["user_id"] = msg.text
+    step = admin_state["step"]
+    if step == "wait_id":
+        admin_state["target_user"] = msg.text
         admin_state["step"] = "wait_amount"
-        await msg.answer("Введите сумму:")
-        return
+        await msg.answer("2️⃣ Введите сумму:")
 
-    if admin_state["step"] == "wait_amount":
+    elif step == "wait_amount":
         admin_state["amount"] = msg.text
         admin_state["step"] = "wait_system"
-        await msg.answer("Введите систему:")
-        return
+        await msg.answer("3️⃣ Введите систему:")
 
-    if admin_state["step"] == "wait_system":
+    elif step == "wait_system":
         cur.execute(
             "INSERT INTO deposits (user_id, amount, card, status, created) VALUES (?, ?, ?, ?, ?)",
             (
-                admin_state["user_id"],
+                admin_state["target_user"],
                 admin_state["amount"],
                 msg.text,
                 "Success",
@@ -226,23 +236,6 @@ async def admin_steps(msg: Message):
         db.commit()
         admin_state["step"] = None
         await msg.answer("✅ Залив добавлен", reply_markup=admin_menu())
-
-# ---------- OTHER ----------
-@dp.message(F.text == "💳 Реквизиты")
-async def rekv(msg: Message):
-    await msg.answer(load_text("REKVIZITY"))
-
-@dp.message(F.text == "📜 Правила")
-async def rules(msg: Message):
-    await msg.answer(load_text("RULES"))
-
-@dp.message(F.text == "⭐ Отзывы")
-async def reviews(msg: Message):
-    await msg.answer(config.get("REVIEWS_CHANNEL", "Канал не указан"))
-
-@dp.message(F.text == "⬅️ В меню")
-async def back_menu(msg: Message):
-    await msg.answer("Главное меню", reply_markup=main_menu(msg.from_user.id))
 
 # ---------- RUN ----------
 async def main():
